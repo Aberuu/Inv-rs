@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/inventor-core",
+    "crates/inventor-kernel",
+    "crates/inventor-sketch",
+    "crates/inventor-io",
+    "crates/inventor-render",
+    "crates/inventor-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Abel <user@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/inventor-rs/inventor-rs"
+
+[workspace.dependencies]
+# Math
+glam = "0.34"
+nalgebra = { version = "0.33", default-features = false, features = ["std", "matrixmultiply"] }
+bytemuck = { version = "1.21", features = ["derive"] }
+
+# Serialization & utils
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.13", features = ["v4", "serde"] }
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+pollster = "1.0"
+
+# Geometric Kernel (Pure Rust)
+truck-modeling = "0.6.0"
+truck-polymesh = "0.6.0"
+truck-meshalgo = "0.4.0"
+truck-shapeops = "0.4.0"
+truck-stepio = "0.3.0"
+truck-topology = "0.6.0"
+
+# UI & Rendering
+eframe = { version = "0.37.0", default-features = true, features = ["default", "wgpu"] }
+egui = "0.37.0"
+egui-wgpu = "0.37.0"
+wgpu = "30.0.1"
+
+# Internal crates
+inventor-core = { path = "crates/inventor-core" }
+inventor-kernel = { path = "crates/inventor-kernel" }
+inventor-sketch = { path = "crates/inventor-sketch" }
+inventor-io = { path = "crates/inventor-io" }
+inventor-render = { path = "crates/inventor-render" }

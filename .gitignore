@@ -1,0 +1,5 @@
+/target/
+Cargo.lock
+*.stl
+*.step
+*.json
