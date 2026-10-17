@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Abel <user@example.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/inventor-rs/inventor-rs"
+repository = "https://github.com/Aberuu/Inv-rs"
 
 [workspace.dependencies]
 # Math

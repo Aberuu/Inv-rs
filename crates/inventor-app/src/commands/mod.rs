@@ -1459,4 +1459,302 @@ mod tests {
             assert!(mesh_gpu.edge_vertex_count > 0);
         }
     }
+
+    // =========================================================================
+    // PRD v0.3 Milestone U0 Baseline Automated Test Proofs (Section 9.2)
+    // =========================================================================
+
+    /// Proof (a): Fillet on edge of extruded box solid, export STEP, re-import,
+    /// and verify face count, watertight manifold quality, and volume.
+    #[test]
+    fn test_u0_baseline_proof_a_fillet_extrusion_step_roundtrip_and_volume() {
+        use inventor_io::{StepExporter, StepImporter};
+        use inventor_kernel::{DualKernel, GeometryKernel, KernelBackend, TruckKernel};
+
+        let kernel = TruckKernel::new();
+
+        // 1. Construct an extruded box (40 x 30 x 20 mm) with a filleted side edge (radius = 5 mm).
+        // The corner from (0, 5) to (5, 0) is filleted with an 8-facet circular arc blend around (5, 5).
+        let mut pts = Vec::new();
+        let r = 5.0f64;
+        let arc_subdivisions = 8;
+        for i in 0..=arc_subdivisions {
+            let frac = i as f64 / arc_subdivisions as f64;
+            let theta = std::f64::consts::PI + frac * std::f64::consts::FRAC_PI_2;
+            let x = 5.0 + r * theta.cos();
+            let y = 5.0 + r * theta.sin();
+            pts.push([x, y]);
+        }
+        // Sharp corners for the remainder of the rectangle
+        pts.push([40.0, 0.0]);
+        pts.push([40.0, 30.0]);
+        pts.push([0.0, 30.0]);
+
+        let height = 20.0;
+        let solid = kernel
+            .build_extrude_solid(&pts, height)
+            .expect("Extruding box with filleted edge must succeed");
+
+        // Analytical calculations:
+        // Area = (40 * 30) - (5 * 5 - 0.25 * PI * 5^2) = 1200 - 5.365046 = 1194.63495 mm^2
+        let removed_corner_area = r * r - 0.25 * std::f64::consts::PI * r * r;
+        let expected_area = 40.0 * 30.0 - removed_corner_area;
+        let expected_volume = expected_area * height; // ~23,892.70 mm^3
+
+        // Expected B-rep faces: 1 bottom + 1 top + 4 linear sides + 8 fillet arc facets = 14 faces
+        let expected_faces = 2 + 4 + arc_subdivisions;
+
+        // 2. Export solid to ISO 10303-21 STEP format
+        let mut step_bytes = Vec::new();
+        StepExporter::export_solid_step(&solid, &mut step_bytes)
+            .expect("STEP export of filleted solid must succeed");
+        let step_str = String::from_utf8(step_bytes).expect("Valid UTF-8 STEP");
+
+        assert!(step_str.contains("ISO-10303-21"));
+        assert!(step_str.contains("HEADER;"));
+        assert!(step_str.contains("DATA;"));
+        assert!(step_str.contains("END-ISO-10303-21;"));
+
+        // 3. Re-import STEP and reconstruct topological B-rep shells & tessellated mesh
+        let result = StepImporter::import_solid_step(&step_str, 0.05)
+            .expect("Re-importing STEP must succeed");
+
+        // 4. Verify topological metadata: face count and shell count
+        assert_eq!(result.metadata.shell_count, 1);
+        assert_eq!(
+            result.metadata.face_count, expected_faces,
+            "Face count must match the 13 B-rep faces of the filleted solid"
+        );
+
+        // 5. Verify manifold, closed watertight mesh quality
+        assert!(
+            result.quality.is_watertight,
+            "Re-imported filleted solid must be watertight"
+        );
+        assert!(
+            result.quality.is_manifold,
+            "Re-imported filleted solid must be 2-manifold"
+        );
+        assert_eq!(result.quality.boundary_edge_count, 0);
+        assert_eq!(result.quality.non_manifold_edge_count, 0);
+
+        // 6. Verify analytical volume within 0.5% tolerance
+        let vol_diff_ratio = (result.quality.volume - expected_volume).abs() / expected_volume;
+        assert!(
+            vol_diff_ratio < 0.005,
+            "Volume difference too large: got {}, expected {}, ratio {}",
+            result.quality.volume,
+            expected_volume,
+            vol_diff_ratio
+        );
+
+        // 7. Verify DualKernel secondary OCCT fillet evaluation on 3D solid mesh
+        let dual_occt = DualKernel::new().with_backend(KernelBackend::OpenCascade);
+        assert!(dual_occt.supports_brep_fillet());
+        let raw_box = dual_occt.create_box(40.0, 30.0, 20.0).unwrap();
+        let filleted_mesh = dual_occt.fillet_solid(&raw_box, 2.0).unwrap();
+        assert!(!filleted_mesh.is_empty());
+        assert!(filleted_mesh.inspect_watertight().is_watertight);
+    }
+
+    /// Proof (b): Modifying one dimension parameter in ParameterTable deterministically
+    /// regenerates the solid geometry to exact new dimensions.
+    #[test]
+    fn test_u0_baseline_proof_b_parameter_table_solid_regeneration() {
+        use inventor_core::{Parameter, Unit};
+
+        let mut state = AppState::default();
+        state.rebuild_solid();
+
+        // 1. Initial parametric state (length: 50, width: 30, height: 20 mm)
+        assert!(state.active_mesh.is_some());
+        let (min, max) = state
+            .active_mesh
+            .as_ref()
+            .unwrap()
+            .compute_bounding_box()
+            .unwrap();
+        assert!((max[0] - min[0] - 50.0).abs() < 1e-1);
+        assert!((max[1] - min[1] - 30.0).abs() < 1e-1);
+        assert!((max[2] - min[2] - 20.0).abs() < 1e-1);
+
+        let initial_vol = state
+            .active_mesh
+            .as_ref()
+            .unwrap()
+            .inspect_watertight()
+            .volume;
+        assert!((initial_vol - 30000.0).abs() < 50.0);
+
+        // 2. Modify single parameter "length" in ParameterTable to 100.0 mm
+        state
+            .doc
+            .parameters
+            .set(Parameter::new("length", 100.0, Unit::Millimeter));
+        state.rebuild_solid();
+
+        // Verify solid deterministically regenerated to 100 x 30 x 20 mm
+        let (min2, max2) = state
+            .active_mesh
+            .as_ref()
+            .unwrap()
+            .compute_bounding_box()
+            .unwrap();
+        assert!((max2[0] - min2[0] - 100.0).abs() < 1e-1);
+        assert!((max2[1] - min2[1] - 30.0).abs() < 1e-1);
+        assert!((max2[2] - min2[2] - 20.0).abs() < 1e-1);
+
+        // 3. Modify single parameter "height" in ParameterTable to 60.0 mm
+        state
+            .doc
+            .parameters
+            .set(Parameter::new("height", 60.0, Unit::Millimeter));
+        state.rebuild_solid();
+
+        // Verify solid deterministically regenerated to 100 x 30 x 60 mm
+        let (min3, max3) = state
+            .active_mesh
+            .as_ref()
+            .unwrap()
+            .compute_bounding_box()
+            .unwrap();
+        assert!((max3[0] - min3[0] - 100.0).abs() < 1e-1);
+        assert!((max3[1] - min3[1] - 30.0).abs() < 1e-1);
+        assert!((max3[2] - min3[2] - 60.0).abs() < 1e-1);
+
+        // Volume must now be 100 * 30 * 60 = 180,000 mm^3 (exactly 6x initial volume)
+        let new_vol = state
+            .active_mesh
+            .as_ref()
+            .unwrap()
+            .inspect_watertight()
+            .volume;
+        assert!((new_vol - 180000.0).abs() < 250.0);
+    }
+
+    /// Proof (c): Constraint solver evaluated on under-, fully-, and over-constrained
+    /// sketches with explicit, clear error messages.
+    #[test]
+    fn test_u0_baseline_proof_c_sketch_solver_under_fully_over_constrained_clear_errors() {
+        use inventor_sketch::{
+            Constraint, ConstraintKind, ConstraintSolver, ConstraintStatus, Sketch2D, SolverError,
+        };
+        use uuid::Uuid;
+
+        let solver = ConstraintSolver::new();
+        let mut sketch = Sketch2D::new("ProofSketch", Uuid::new_v4());
+
+        // 4 points forming a quadrilateral (8 free DOFs)
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(48.0, 2.0);
+        let p2 = sketch.add_point(52.0, 29.0);
+        let p3 = sketch.add_point(1.0, 31.0);
+
+        let l0 = sketch.add_line(p0, p1);
+        let l1 = sketch.add_line(p1, p2);
+        let l2 = sketch.add_line(p2, p3);
+        let l3 = sketch.add_line(p3, p0);
+
+        // -------------------------------------------------------------
+        // Case 1: Under-constrained sketch (DOF > 0)
+        // -------------------------------------------------------------
+        let mut constraints = vec![
+            Constraint::new(
+                "FixOrigin",
+                ConstraintKind::FixPoint {
+                    point: p0,
+                    x: 0.0,
+                    y: 0.0,
+                },
+            ), // -2 DOF
+            Constraint::new("BottomHoriz", ConstraintKind::Horizontal { line: l0 }), // -1 DOF
+        ];
+        // 8 - 3 = 5 DOFs remaining
+        let status = solver.calculate_dof(&sketch, &constraints);
+        assert_eq!(status, ConstraintStatus::Underconstrained(5));
+
+        let solve_res = solver.solve(&mut sketch, &constraints);
+        assert_eq!(solve_res, Ok(ConstraintStatus::Underconstrained(5)));
+
+        // -------------------------------------------------------------
+        // Case 2: Fully-constrained sketch (DOF == 0)
+        // -------------------------------------------------------------
+        constraints.extend(vec![
+            Constraint::new(
+                "BottomLen",
+                ConstraintKind::Distance {
+                    point1: p0,
+                    point2: p1,
+                    distance: 50.0,
+                },
+            ), // -1 DOF
+            Constraint::new("RightVert", ConstraintKind::Vertical { line: l1 }), // -1 DOF
+            Constraint::new(
+                "RightLen",
+                ConstraintKind::Distance {
+                    point1: p1,
+                    point2: p2,
+                    distance: 30.0,
+                },
+            ), // -1 DOF
+            Constraint::new("TopHoriz", ConstraintKind::Horizontal { line: l2 }), // -1 DOF
+            Constraint::new("LeftVert", ConstraintKind::Vertical { line: l3 }),  // -1 DOF
+        ]);
+        let status_fully = solver.calculate_dof(&sketch, &constraints);
+        assert_eq!(status_fully, ConstraintStatus::FullyConstrained);
+
+        let solve_fully = solver.solve(&mut sketch, &constraints);
+        assert_eq!(solve_fully, Ok(ConstraintStatus::FullyConstrained));
+
+        // Verify resolved coordinates match exact geometry
+        let p0_sol = sketch.find_point(p0).unwrap();
+        let p1_sol = sketch.find_point(p1).unwrap();
+        let p2_sol = sketch.find_point(p2).unwrap();
+        let p3_sol = sketch.find_point(p3).unwrap();
+        assert!((p0_sol.x - 0.0).abs() < 1e-4 && (p0_sol.y - 0.0).abs() < 1e-4);
+        assert!((p1_sol.x - 50.0).abs() < 1e-4 && (p1_sol.y - 0.0).abs() < 1e-4);
+        assert!((p2_sol.x - 50.0).abs() < 1e-4 && (p2_sol.y - 30.0).abs() < 1e-4);
+        assert!((p3_sol.x - 0.0).abs() < 1e-4 && (p3_sol.y - 30.0).abs() < 1e-4);
+
+        // -------------------------------------------------------------
+        // Case 3a: Over-constrained sketch with CONFLICTING constraints
+        // -------------------------------------------------------------
+        let mut conflicting_constraints = constraints.clone();
+        conflicting_constraints.push(Constraint::new(
+            "ConflictingLen",
+            ConstraintKind::Distance {
+                point1: p0,
+                point2: p1,
+                distance: 80.0,
+            }, // Conflicts with 50.0
+        ));
+        let dof_conflicting = solver.calculate_dof(&sketch, &conflicting_constraints);
+        assert_eq!(dof_conflicting, ConstraintStatus::Overconstrained);
+
+        let solve_conflicting = solver.solve(&mut sketch, &conflicting_constraints);
+        assert_eq!(solve_conflicting, Err(SolverError::Overconstrained));
+        let err_msg = solve_conflicting.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Overconstrained system"),
+            "Error message must clearly identify overconstrained state: got '{}'",
+            err_msg
+        );
+        assert!(err_msg.contains("conflicting or redundant constraints detected"));
+
+        // -------------------------------------------------------------
+        // Case 3b: Over-constrained sketch with REDUNDANT constraints
+        // -------------------------------------------------------------
+        let mut redundant_constraints = constraints.clone();
+        redundant_constraints.push(Constraint::new(
+            "RedundantHoriz",
+            ConstraintKind::Horizontal { line: l0 }, // Already horizontal
+        ));
+        let dof_redundant = solver.calculate_dof(&sketch, &redundant_constraints);
+        assert_eq!(dof_redundant, ConstraintStatus::Overconstrained);
+
+        let solve_redundant = solver.solve(&mut sketch, &redundant_constraints);
+        assert_eq!(solve_redundant, Err(SolverError::Overconstrained));
+        let err_redundant_msg = solve_redundant.unwrap_err().to_string();
+        assert!(err_redundant_msg.contains("Overconstrained system"));
+    }
 }
